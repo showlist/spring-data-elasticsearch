@@ -26,7 +26,6 @@ import java.util.stream.Collectors;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.data.convert.ReadingConverter;
 import org.springframework.data.convert.WritingConverter;
-import org.springframework.data.elasticsearch.core.document.Document;
 import org.springframework.data.elasticsearch.core.geo.GeoJson;
 import org.springframework.data.elasticsearch.core.geo.GeoJsonGeometryCollection;
 import org.springframework.data.elasticsearch.core.geo.GeoJsonLineString;
@@ -68,14 +67,14 @@ public class GeoConverters {
 	 * {@link Converter} to write a {@link Point} to {@link Map} using {@code lat/long} properties.
 	 */
 	@WritingConverter
-	public enum PointToMapConverter implements Converter<Point, Document> {
+	public enum PointToMapConverter implements Converter<Point, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(Point source) {
+		public Map<String, Object> convert(Point source) {
 
-			Document target = Document.create();
+			Map<String, Object> target = new LinkedHashMap<>();
 			target.put("lat", source.getY());
 			target.put("lon", source.getX());
 			return target;
@@ -105,13 +104,13 @@ public class GeoConverters {
 	 * {@link Converter} to write a {@link GeoPoint} to {@link Map} using {@code lat/long} properties.
 	 */
 	@WritingConverter
-	public enum GeoPointToMapConverter implements Converter<GeoPoint, Document> {
+	public enum GeoPointToMapConverter implements Converter<GeoPoint, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoPoint source) {
-			Document target = Document.create();
+		public Map<String, Object> convert(GeoPoint source) {
+			Map<String, Object> target = new LinkedHashMap<>();
 			target.put("lat", source.getLat());
 			target.put("lon", source.getLon());
 			return target;
@@ -136,12 +135,12 @@ public class GeoConverters {
 
 	// region GeoJson
 	@WritingConverter
-	public enum GeoJsonToMapConverter implements Converter<GeoJson<? extends Iterable<?>>, Document> {
+	public enum GeoJsonToMapConverter implements Converter<GeoJson<? extends Iterable<?>>, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJson<? extends Iterable<?>> source) {
+		public Map<String, Object> convert(GeoJson<? extends Iterable<?>> source) {
 			if (source instanceof GeoJsonPoint) {
 				return GeoJsonPointToMapConverter.INSTANCE.convert((GeoJsonPoint) source);
 			} else if (source instanceof GeoJsonMultiPoint) {
@@ -196,13 +195,13 @@ public class GeoConverters {
 
 	// region GeoJsonPoint
 	@WritingConverter
-	public enum GeoJsonPointToMapConverter implements Converter<GeoJsonPoint, Document> {
+	public enum GeoJsonPointToMapConverter implements Converter<GeoJsonPoint, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonPoint geoJsonPoint) {
-			Document map = Document.create();
+		public Map<String, Object> convert(GeoJsonPoint geoJsonPoint) {
+			Map<String, Object> map = new LinkedHashMap<>();
 			map.put("type", geoJsonPoint.getType());
 			map.put("coordinates", geoJsonPoint.getCoordinates());
 			return map;
@@ -234,13 +233,13 @@ public class GeoConverters {
 
 	// region GeoJsonMultiPoint
 	@WritingConverter
-	public enum GeoJsonMultiPointToMapConverter implements Converter<GeoJsonMultiPoint, Document> {
+	public enum GeoJsonMultiPointToMapConverter implements Converter<GeoJsonMultiPoint, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonMultiPoint geoJsonMultiPoint) {
-			Document map = Document.create();
+		public Map<String, Object> convert(GeoJsonMultiPoint geoJsonMultiPoint) {
+			Map<String, Object> map = new LinkedHashMap<>();
 			map.put("type", geoJsonMultiPoint.getType());
 			map.put("coordinates", pointsToCoordinates(geoJsonMultiPoint.getCoordinates()));
 			return map;
@@ -269,13 +268,13 @@ public class GeoConverters {
 
 	// region GeoJsonLineString
 	@WritingConverter
-	public enum GeoJsonLineStringToMapConverter implements Converter<GeoJsonLineString, Document> {
+	public enum GeoJsonLineStringToMapConverter implements Converter<GeoJsonLineString, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonLineString geoJsonLineString) {
-			Document map = Document.create();
+		public Map<String, Object> convert(GeoJsonLineString geoJsonLineString) {
+			Map<String, Object> map = new LinkedHashMap<>();
 			map.put("type", geoJsonLineString.getType());
 			map.put("coordinates", pointsToCoordinates(geoJsonLineString.getCoordinates()));
 			return map;
@@ -304,12 +303,12 @@ public class GeoConverters {
 
 	// region GeoJsonMultiLineString
 	@WritingConverter
-	public enum GeoJsonMultiLineStringToMapConverter implements Converter<GeoJsonMultiLineString, Document> {
+	public enum GeoJsonMultiLineStringToMapConverter implements Converter<GeoJsonMultiLineString, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonMultiLineString source) {
+		public Map<String, Object> convert(GeoJsonMultiLineString source) {
 			return geoJsonLinesStringsToMap(source.getType(), source.getCoordinates());
 		}
 	}
@@ -332,12 +331,12 @@ public class GeoConverters {
 
 	// region GeoJsonPolygon
 	@WritingConverter
-	public enum GeoJsonPolygonToMapConverter implements Converter<GeoJsonPolygon, Document> {
+	public enum GeoJsonPolygonToMapConverter implements Converter<GeoJsonPolygon, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonPolygon source) {
+		public Map<String, Object> convert(GeoJsonPolygon source) {
 			return geoJsonLinesStringsToMap(source.getType(), source.getCoordinates());
 		}
 	}
@@ -370,9 +369,9 @@ public class GeoConverters {
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonMultiPolygon source) {
+		public Map<String, Object> convert(GeoJsonMultiPolygon source) {
 
-			Document map = Document.create();
+			Map<String, Object> map = new LinkedHashMap<>();
 			map.put("type", source.getType());
 
 			List<Object> coordinates = source.getCoordinates().stream() //
@@ -401,7 +400,7 @@ public class GeoConverters {
 			Assert.isTrue(coordinates instanceof List, "coordinates must be a List");
 
 			List<GeoJsonPolygon> geoJsonPolygons = ((List<?>) coordinates).stream().map(it -> {
-				Document map = Document.create();
+				Map<String, Object> map = new LinkedHashMap<>();
 				map.put("type", GeoJsonPolygon.TYPE);
 				map.put("coordinates", it);
 				return map;
@@ -415,14 +414,14 @@ public class GeoConverters {
 	// region GeoJsonGeometryCollection
 	@WritingConverter
 	public enum GeoJsonGeometryCollectionToMapConverter
-			implements Converter<GeoJsonGeometryCollection, Document> {
+			implements Converter<GeoJsonGeometryCollection, Map<String, Object>> {
 
 		INSTANCE;
 
 		@Override
-		public Document convert(GeoJsonGeometryCollection source) {
+		public Map<String, Object> convert(GeoJsonGeometryCollection source) {
 
-			Document map = Document.create();
+			Map<String, Object> map = new LinkedHashMap<>();
 			map.put("type", source.getType());
 			List<Map<String, Object>> geometries = source.getGeometries().stream()
 					.map(GeoJsonToMapConverter.INSTANCE::convert).collect(Collectors.toList());
@@ -485,8 +484,8 @@ public class GeoConverters {
 		}).collect(Collectors.toList());
 	}
 
-	private static Document geoJsonLinesStringsToMap(String type, List<GeoJsonLineString> lineStrings) {
-		Document map = Document.create();
+	private static Map<String, Object> geoJsonLinesStringsToMap(String type, List<GeoJsonLineString> lineStrings) {
+		Map<String, Object> map = new LinkedHashMap<>();
 		map.put("type", type);
 		List<List<List<Double>>> coordinates = lineStrings.stream()
 				.map(it -> GeoConverters.pointsToCoordinates(it.getCoordinates())).collect(Collectors.toList());
