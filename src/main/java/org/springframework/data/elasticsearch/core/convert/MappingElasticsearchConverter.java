@@ -37,7 +37,6 @@ import org.springframework.data.convert.CustomConversions;
 import org.springframework.data.elasticsearch.annotations.ScriptedField;
 import org.springframework.data.elasticsearch.core.document.Document;
 import org.springframework.data.elasticsearch.core.document.SearchDocument;
-import org.springframework.data.elasticsearch.core.join.JoinField;
 import org.springframework.data.elasticsearch.core.mapping.ElasticsearchPersistentEntity;
 import org.springframework.data.elasticsearch.core.mapping.ElasticsearchPersistentProperty;
 import org.springframework.data.elasticsearch.core.mapping.ElasticsearchPersistentPropertyConverter;
@@ -60,12 +59,12 @@ import org.springframework.data.mapping.model.SpELContext;
 import org.springframework.data.mapping.model.SpELExpressionEvaluator;
 import org.springframework.data.mapping.model.SpELExpressionParameterValueProvider;
 import org.springframework.data.util.ClassTypeInformation;
-import org.springframework.data.util.Streamable;
 import org.springframework.data.util.TypeInformation;
 import org.springframework.format.datetime.DateFormatterRegistrar;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
 
 /**
@@ -490,7 +489,6 @@ public class MappingElasticsearchConverter
 		return (R) map;
 	}
 
-	@SuppressWarnings({ "unchecked", "rawtypes" })
 	@Nullable
 	private Object getPotentiallyConvertedSimpleRead(@Nullable Object value, TypeInformation<?> targetType) {
 		return getPotentiallyConvertedSimpleRead(value, targetType.getType());
@@ -552,35 +550,73 @@ public class MappingElasticsearchConverter
 		}
 
 		Class<?> entityType = ClassUtils.getUserClass(source.getClass());
-		TypeInformation<?> type = ClassTypeInformation.from(entityType);
+		TypeInformation<? extends Object> type = ClassTypeInformation.from(entityType);
 
-		if (requiresTypeHint(type, source.getClass(), null)) {
-			typeMapper.writeType(source.getClass(), sink);
+		if (requiresTypeHint(entityType)) {
+			typeMapper.writeType(type, sink);
 		}
 
-		Optional<Class<?>> customTarget = getConversions().getCustomWriteTarget(entityType, Map.class);
+		writeInternal(source, sink, type);
+	}
 
-		if (customTarget.isPresent()) {
-			sink.putAll(conversionService.convert(source, Map.class));
+	/**
+	 * Internal write conversion method which should be used for nested invocations.
+	 *
+	 * @param source
+	 * @param sink
+	 * @param typeHint
+	 */
+	@SuppressWarnings("unchecked")
+	protected void writeInternal(@Nullable Object source, Map<String, Object> sink,
+			@Nullable TypeInformation<?> typeHint) {
+
+		if (null == source) {
 			return;
 		}
 
-		ElasticsearchPersistentEntity<?> entity = type.getType().equals(entityType)
-				? mappingContext.getRequiredPersistentEntity(type)
-				: mappingContext.getRequiredPersistentEntity(entityType);
+		Class<?> entityType = source.getClass();
+		Optional<Class<?>> customTarget = conversions.getCustomWriteTarget(entityType, Map.class);
 
-		writeEntity(entity, source, sink, null);
-	}
-
-	protected void writeEntity(ElasticsearchPersistentEntity<?> entity, Object source, Document sink,
-			@Nullable TypeInformation<?> containingStructure) {
-
-		PersistentPropertyAccessor<?> accessor = entity.getPropertyAccessor(source);
-
-		if (requiresTypeHint(entity.getTypeInformation(), source.getClass(), containingStructure)) {
-			typeMapper.writeType(source.getClass(), sink);
+		if (customTarget.isPresent()) {
+			Map<String, Object> result = conversionService.convert(source, Map.class);
+			sink.putAll(result);
+			return;
 		}
 
+		if (Map.class.isAssignableFrom(entityType)) {
+			writeMapInternal((Map<Object, Object>) source, sink, ClassTypeInformation.MAP);
+			return;
+		}
+
+		if (Collection.class.isAssignableFrom(entityType)) {
+			writeCollectionInternal((Collection<?>) source, ClassTypeInformation.LIST, (Collection<?>) sink);
+			return;
+		}
+
+		ElasticsearchPersistentEntity<?> entity = mappingContext.getRequiredPersistentEntity(entityType);
+		addCustomTypeKeyIfNecessary(typeHint, source, sink);
+		writeInternal(source, sink, entity);
+	}
+
+	/**
+	 * Internal write conversion method which should be used for nested invocations.
+	 *
+	 * @param source
+	 * @param sink
+	 * @param typeHint
+	 */
+	protected void writeInternal(@Nullable Object source, Map<String, Object> sink,
+			@Nullable ElasticsearchPersistentEntity<?> entity) {
+
+		if (source == null) {
+			return;
+		}
+
+		if (null == entity) {
+			throw new MappingException("No mapping metadata found for entity of type " + source.getClass().getName());
+		}
+
+		PersistentPropertyAccessor<?> accessor = entity.getPropertyAccessor(source);
 		writeProperties(entity, accessor, new MapValueAccessor(sink));
 	}
 
@@ -606,6 +642,7 @@ public class MappingElasticsearchConverter
 
 			if (property.hasPropertyConverter()) {
 				value = propertyConverterWrite(property, value);
+				sink.set(property, value);
 			} else if (TemporalAccessor.class.isAssignableFrom(property.getActualType())
 					&& !getConversions().hasCustomWriteTarget(value.getClass())) {
 
@@ -620,12 +657,10 @@ public class MappingElasticsearchConverter
 							property.getType().getSimpleName(), propertyName);
 					propertyWarnings.put(key, count + 1);
 				}
-			}
-
-			if (!isSimpleType(value)) {
+			} else if (!isSimpleType(value)) {
 				writeProperty(property, value, sink);
 			} else {
-				Object writeSimpleValue = getWriteSimpleValue(value);
+				Object writeSimpleValue = getPotentiallyConvertedSimpleWrite(value, Object.class);
 				if (writeSimpleValue != null) {
 					sink.set(property, writeSimpleValue);
 				}
@@ -647,6 +682,7 @@ public class MappingElasticsearchConverter
 		return value;
 	}
 
+	@SuppressWarnings("unchecked")
 	protected void writeProperty(ElasticsearchPersistentProperty property, Object value, MapValueAccessor sink) {
 
 		Optional<Class<?>> customWriteTarget = getConversions().getCustomWriteTarget(value.getClass());
@@ -657,24 +693,208 @@ public class MappingElasticsearchConverter
 			return;
 		}
 
-		TypeInformation<?> typeHint = property.getTypeInformation();
-		if (typeHint.equals(ClassTypeInformation.OBJECT)) {
+		TypeInformation<?> valueType = ClassTypeInformation.from(value.getClass());
+		TypeInformation<?> type = property.getTypeInformation();
 
-			if (value instanceof List) {
-				typeHint = ClassTypeInformation.LIST;
-			} else if (value instanceof Map) {
-				typeHint = ClassTypeInformation.MAP;
-			} else if (value instanceof Set) {
-				typeHint = ClassTypeInformation.SET;
-			} else if (value instanceof Collection) {
-				typeHint = ClassTypeInformation.COLLECTION;
+		if (valueType.isCollectionLike()) {
+			List<Object> collectionInternal = createCollection(asCollection(value), property);
+			sink.set(property, collectionInternal);
+			return;
+		}
+
+		if (valueType.isMap()) {
+			Map<String, Object> mapDbObj = createMap((Map<?, ?>) value, property);
+			sink.set(property, mapDbObj);
+			return;
+		}
+
+		// Lookup potential custom target type
+		Optional<Class<?>> basicTargetType = conversions.getCustomWriteTarget(value.getClass());
+
+		if (basicTargetType.isPresent()) {
+
+			sink.set(property, conversionService.convert(value, basicTargetType.get()));
+			return;
+		}
+
+		ElasticsearchPersistentEntity<?> entity = valueType.isSubTypeOf(property.getType())
+				? mappingContext.getRequiredPersistentEntity(value.getClass())
+				: mappingContext.getRequiredPersistentEntity(type);
+
+		Object existingValue = sink.get(property);
+		Map<String, Object> document = existingValue instanceof Map ? (Map<String, Object>) existingValue
+				: Document.create();
+
+		addCustomTypeKeyIfNecessary(ClassTypeInformation.from(property.getRawType()), value, document);
+		writeInternal(value, document, entity);
+		sink.set(property, document);
+	}
+
+	/**
+	 * Writes the given {@link Collection} using the given {@link ElasticsearchPersistentProperty} information.
+	 *
+	 * @param collection must not be {@literal null}.
+	 * @param property must not be {@literal null}.
+	 * @return
+	 */
+	protected List<Object> createCollection(Collection<?> collection, ElasticsearchPersistentProperty property) {
+		return writeCollectionInternal(collection, property.getTypeInformation(), new ArrayList<>(collection.size()));
+	}
+
+	/**
+	 * Writes the given {@link Map} using the given {@link ElasticsearchPersistentProperty} information.
+	 *
+	 * @param map must not {@literal null}.
+	 * @param property must not be {@literal null}.
+	 * @return
+	 */
+	protected Map<String, Object> createMap(Map<?, ?> map, ElasticsearchPersistentProperty property) {
+
+		Assert.notNull(map, "Given map must not be null!");
+		Assert.notNull(property, "PersistentProperty must not be null!");
+
+		return writeMapInternal(map, new LinkedHashMap<>(map.size()), property.getTypeInformation());
+	}
+
+	/**
+	 * Writes the given {@link Map} to the given {@link Document} considering the given {@link TypeInformation}.
+	 *
+	 * @param source must not be {@literal null}.
+	 * @param sink must not be {@literal null}.
+	 * @param propertyType must not be {@literal null}.
+	 * @return
+	 */
+	protected Map<String, Object> writeMapInternal(Map<?, ?> source, Map<String, Object> sink,
+			TypeInformation<?> propertyType) {
+
+		for (Map.Entry<?, ?> entry : source.entrySet()) {
+
+			Object key = entry.getKey();
+			Object value = entry.getValue();
+
+			if (isSimpleType(key.getClass())) {
+
+				String simpleKey = potentiallyConvertMapKey(key);
+				if (value == null || isSimpleType(value)) {
+					sink.put(simpleKey, getPotentiallyConvertedSimpleWrite(value, Object.class));
+				} else if (value instanceof Collection || value.getClass().isArray()) {
+					sink.put(simpleKey,
+							writeCollectionInternal(asCollection(value), propertyType.getMapValueType(), new ArrayList<>()));
+				} else {
+					Map<String, Object> document = Document.create();
+					TypeInformation<?> valueTypeInfo = propertyType.isMap() ? propertyType.getMapValueType()
+							: ClassTypeInformation.OBJECT;
+					writeInternal(value, document, valueTypeInfo);
+
+					sink.put(simpleKey, document);
+				}
+			} else {
+				throw new MappingException("Cannot use a complex object as a key value.");
 			}
 		}
 
-		sink.set(property, getWriteComplexValue(property, typeHint, value));
+		return sink;
 	}
 
+	/**
+	 * Populates the given {@link Collection sink} with converted values from the given {@link Collection source}.
+	 *
+	 * @param source the collection to create a {@link Collection} for, must not be {@literal null}.
+	 * @param type the {@link TypeInformation} to consider or {@literal null} if unknown.
+	 * @param sink the {@link Collection} to write to.
+	 * @return
+	 */
+	@SuppressWarnings("unchecked")
+	private List<Object> writeCollectionInternal(Collection<?> source, @Nullable TypeInformation<?> type,
+			Collection<?> sink) {
+
+		TypeInformation<?> componentType = null;
+
+		List<Object> collection = sink instanceof List ? (List<Object>) sink : new ArrayList<>(sink);
+
+		if (type != null) {
+			componentType = type.getComponentType();
+		}
+
+		for (Object element : source) {
+
+			Class<?> elementType = element == null ? null : element.getClass();
+
+			if (elementType == null || conversions.isSimpleType(elementType)) {
+				collection.add(getPotentiallyConvertedSimpleWrite(element,
+						componentType != null ? componentType.getType() : Object.class));
+			} else if (element instanceof Collection || elementType.isArray()) {
+				collection.add(writeCollectionInternal(asCollection(element), componentType, new ArrayList<>()));
+			} else {
+				Map<String, Object> document = Document.create();
+				writeInternal(element, document, componentType);
+				collection.add(document);
+			}
+		}
+
+		return collection;
+	}
+
+	/**
+	 * Returns a {@link String} representation of the given {@link Map} key
+	 *
+	 * @param key
+	 * @return
+	 */
+	private String potentiallyConvertMapKey(Object key) {
+
+		if (key instanceof String) {
+			return (String) key;
+		}
+
+		return conversions.hasCustomWriteTarget(key.getClass(), String.class)
+				? (String) getPotentiallyConvertedSimpleWrite(key, Object.class)
+				: key.toString();
+	}
+
+	/**
+	 * Checks whether we have a custom conversion registered for the given value into an arbitrary simple Elasticsearch
+	 * type. Returns the converted value if so. If not, we perform special enum handling or simply return the value as is.
+	 *
+	 * @param value
+	 * @return
+	 */
 	@Nullable
+	private Object getPotentiallyConvertedSimpleWrite(@Nullable Object value, @Nullable Class<?> typeHint) {
+
+		if (value == null) {
+			return null;
+		}
+
+		if (typeHint != null && Object.class != typeHint) {
+
+			if (conversionService.canConvert(value.getClass(), typeHint)) {
+				value = conversionService.convert(value, typeHint);
+			}
+		}
+
+		Optional<Class<?>> customTarget = conversions.getCustomWriteTarget(value.getClass());
+
+		if (customTarget.isPresent()) {
+			return conversionService.convert(value, customTarget.get());
+		}
+
+		if (ObjectUtils.isArray(value)) {
+
+			if (value instanceof byte[]) {
+				return value;
+			}
+			return asCollection(value);
+		}
+
+		return Enum.class.isAssignableFrom(value.getClass()) ? ((Enum<?>) value).name() : value;
+	}
+
+	/**
+	 * @deprecated since 4.2, use {@link #getPotentiallyConvertedSimpleWrite(Object, Class)} instead.
+	 */
+	@Nullable
+	@Deprecated
 	protected Object getWriteSimpleValue(Object value) {
 		Optional<Class<?>> customTarget = getConversions().getCustomWriteTarget(value.getClass());
 
@@ -685,140 +905,53 @@ public class MappingElasticsearchConverter
 		return Enum.class.isAssignableFrom(value.getClass()) ? ((Enum<?>) value).name() : value;
 	}
 
-	@SuppressWarnings("unchecked")
+	/**
+	 * @deprecated since 4.2, use {@link #writeInternal(Object, Map, TypeInformation)} instead.
+	 */
+	@Deprecated
 	protected Object getWriteComplexValue(ElasticsearchPersistentProperty property, TypeInformation<?> typeHint,
 			Object value) {
 
-		if (typeHint.isCollectionLike() || value instanceof Iterable) {
-			return writeCollectionValue(value, property, typeHint);
-		}
-		if (typeHint.isMap()) {
-			return writeMapValue((Map<String, Object>) value, property, typeHint);
-		}
+		Document document = Document.create();
+		writeInternal(value, document, property.getTypeInformation());
 
-		if (property.isEntity() || !isSimpleType(value)) {
-			return writeEntity(value, property);
-		}
-
-		return value;
+		return document;
 	}
 
-	private Object writeEntity(Object value, ElasticsearchPersistentProperty property) {
-
-		Document target = Document.create();
-		writeEntity(mappingContext.getRequiredPersistentEntity(value.getClass()), value, target,
-				property.getTypeInformation());
-		return target;
-	}
-
-	private Object writeMapValue(Map<String, Object> value, ElasticsearchPersistentProperty property,
-			TypeInformation<?> typeHint) {
-
-		Map<Object, Object> target = new LinkedHashMap<>();
-		Streamable<Entry<String, Object>> mapSource = Streamable.of(value.entrySet());
-
-		TypeInformation<?> actualType = typeHint.getActualType();
-
-		if (actualType != null && !actualType.getType().equals(Object.class)
-				&& isSimpleType(typeHint.getMapValueType().getType())) {
-			mapSource.forEach(it -> {
-
-				if (it.getValue() == null) {
-					target.put(it.getKey(), null);
-				} else {
-					target.put(it.getKey(), getWriteSimpleValue(it.getValue()));
-				}
-			});
-		} else {
-
-			mapSource.forEach(it -> {
-
-				Object converted = null;
-				if (it.getValue() != null) {
-
-					if (isSimpleType(it.getValue())) {
-						converted = getWriteSimpleValue(it.getValue());
-					} else {
-						converted = getWriteComplexValue(property, ClassTypeInformation.from(it.getValue().getClass()),
-								it.getValue());
-					}
-				}
-
-				target.put(it.getKey(), converted);
-			});
-		}
-
-		return target;
-	}
-
-	private Object writeCollectionValue(Object value, ElasticsearchPersistentProperty property,
-			TypeInformation<?> typeHint) {
-
-		Streamable<?> collectionSource = value instanceof Iterable ? Streamable.of((Iterable<?>) value)
-				: Streamable.of(ObjectUtils.toObjectArray(value));
-
-		List<Object> target = new ArrayList<>();
-		TypeInformation<?> actualType = typeHint.getActualType();
-		Class<?> type = actualType != null ? actualType.getType() : null;
-
-		if (type != null && !type.equals(Object.class) && isSimpleType(type)) {
-			// noinspection ReturnOfNull
-			collectionSource //
-					.map(element -> element != null ? getWriteSimpleValue(element) : null) //
-					.forEach(target::add);
-		} else {
-
-			collectionSource.map(it -> {
-
-				if (it == null) {
-					// noinspection ReturnOfNull
-					return null;
-				}
-
-				if (isSimpleType(it)) {
-					return getWriteSimpleValue(it);
-				}
-
-				return getWriteComplexValue(property, ClassTypeInformation.from(it.getClass()), it);
-			}).forEach(target::add);
-
-		}
-		return target;
-	}
 	// endregion
 
 	// region helper methods
-	private boolean requiresTypeHint(TypeInformation<?> type, Class<?> actualType,
-			@Nullable TypeInformation<?> container) {
 
-		if (container != null) {
+	/**
+	 * Adds custom type information to the given {@link Map} if necessary. That is if the value is not the same as the one
+	 * given. This is usually the case if you store a subtype of the actual declared type of the property.
+	 *
+	 * @param type
+	 * @param value must not be {@literal null}.
+	 * @param sink must not be {@literal null}.
+	 */
+	protected void addCustomTypeKeyIfNecessary(@Nullable TypeInformation<?> type, Object value,
+			Map<String, Object> sink) {
 
-			if (container.isCollectionLike()) {
-				if (type.equals(container.getActualType()) && type.getType().equals(actualType)) {
-					return false;
-				}
-			}
+		Class<?> reference = type != null ? type.getActualType().getType() : Object.class;
+		Class<?> valueType = ClassUtils.getUserClass(value.getClass());
 
-			if (container.isMap()) {
-				if (type.equals(container.getMapValueType()) && type.getType().equals(actualType)) {
-					return false;
-				}
-			}
-
-			if (container.equals(type) && type.getType().equals(actualType)) {
-				return false;
-			}
-
-			if (container.getRawTypeInformation().equals(type)) {
-				Class<?> containerClass = container.getRawTypeInformation().getType();
-				if (containerClass.equals(JoinField.class) && type.getType().equals(actualType)) {
-					return false;
-				}
-			}
+		boolean notTheSameClass = !valueType.equals(reference);
+		if (notTheSameClass) {
+			typeMapper.writeType(valueType, sink);
 		}
+	}
 
-		return !getConversions().isSimpleType(type.getType()) && !type.isCollectionLike()
-				&& !getConversions().hasCustomWriteTarget(type.getType());
+	/**
+	 * Check if a given type requires a type hint (aka {@literal _class} attribute) when writing to the document.
+	 *
+	 * @param type must not be {@literal null}.
+	 * @return {@literal true} if not a simple type, {@link Collection} or type with custom write target.
+	 */
+	private boolean requiresTypeHint(Class<?> type) {
+
+		return !isSimpleType(type) && !ClassUtils.isAssignable(Collection.class, type)
+				&& !conversions.hasCustomWriteTarget(type, Document.class);
 	}
 
 	/**
@@ -847,7 +980,24 @@ public class MappingElasticsearchConverter
 	}
 
 	private boolean isSimpleType(Class<?> type) {
-		return getConversions().isSimpleType(type);
+		return !Map.class.isAssignableFrom(type) && getConversions().isSimpleType(type);
+	}
+
+	/**
+	 * Returns given object as {@link Collection}. Will return the {@link Collection} as is if the source is a
+	 * {@link Collection} already, will convert an array into a {@link Collection} or simply create a single element
+	 * collection for everything else.
+	 *
+	 * @param source
+	 * @return
+	 */
+	private static Collection<?> asCollection(Object source) {
+
+		if (source instanceof Collection) {
+			return (Collection<?>) source;
+		}
+
+		return source.getClass().isArray() ? CollectionUtils.arrayToList(source) : Collections.singleton(source);
 	}
 	// endregion
 
@@ -1018,7 +1168,7 @@ public class MappingElasticsearchConverter
 	 * Extension of {@link SpELExpressionParameterValueProvider} to recursively trigger value conversion on the raw
 	 * resolved SpEL value.
 	 *
-	 * @author Mark Oaluch
+	 * @author Mark Paluch
 	 */
 	private class ConverterAwareSpELExpressionParameterValueProvider
 			extends SpELExpressionParameterValueProvider<ElasticsearchPersistentProperty> {
